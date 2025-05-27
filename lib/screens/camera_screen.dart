@@ -17,6 +17,7 @@ class _CameraScreenState extends State<CameraScreen> {
   final ImagePicker _picker = ImagePicker();
   final ImageAnalysisService _analysisService = ImageAnalysisService();
   bool _isAnalyzing = false;
+  String _analysisStatus = '';
 
   @override
   Widget build(BuildContext context) {
@@ -55,16 +56,17 @@ class _CameraScreenState extends State<CameraScreen> {
                         ),
                         const SizedBox(height: 16),
                         Text(
-                          'Capture Tips',
+                          'Capture Tips for Best Results',
                           style: Theme.of(context).textTheme.titleLarge?.copyWith(
                             fontWeight: FontWeight.bold,
                           ),
                         ),
                         const SizedBox(height: 16),
-                        _buildTipItem('📄', 'Place document on flat surface'),
-                        _buildTipItem('💡', 'Ensure good lighting'),
-                        _buildTipItem('📐', 'Keep camera parallel to document'),
-                        _buildTipItem('🔍', 'Include entire document in frame'),
+                        _buildTipItem('📄', 'Place document on flat, contrasting surface'),
+                        _buildTipItem('💡', 'Use bright, even lighting (avoid shadows)'),
+                        _buildTipItem('📐', 'Keep camera parallel and centered'),
+                        _buildTipItem('🔍', 'Fill frame with document (include all edges)'),
+                        _buildTipItem('📱', 'Hold steady and tap to focus before capture'),
                       ],
                     ),
                   ),
@@ -77,13 +79,22 @@ class _CameraScreenState extends State<CameraScreen> {
                   height: 60,
                   child: ElevatedButton.icon(
                     onPressed: _isAnalyzing ? null : () => _captureImage(ImageSource.camera),
-                    icon: const Icon(Icons.camera_alt, size: 28),
+                    icon: _isAnalyzing 
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                            ),
+                          )
+                        : const Icon(Icons.camera_alt, size: 28),
                     label: Text(
-                      _isAnalyzing ? 'Analyzing...' : 'Open Camera',
+                      _isAnalyzing ? 'Analyzing Document...' : 'Open Camera',
                       style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
                     ),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.blue,
+                      backgroundColor: _isAnalyzing ? Colors.grey : Colors.blue,
                       foregroundColor: Colors.white,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(15),
@@ -92,22 +103,22 @@ class _CameraScreenState extends State<CameraScreen> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 16),
                 
-                // Gallery Button
+                const SizedBox(height: 20),
+                
+                // Gallery option for testing
                 SizedBox(
                   width: double.infinity,
-                  height: 60,
+                  height: 50,
                   child: OutlinedButton.icon(
                     onPressed: _isAnalyzing ? null : () => _captureImage(ImageSource.gallery),
-                    icon: const Icon(Icons.photo_library, size: 28),
+                    icon: const Icon(Icons.photo_library, size: 24),
                     label: const Text(
                       'Choose from Gallery',
-                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
                     ),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: Colors.blue,
-                      side: const BorderSide(color: Colors.blue, width: 2),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(15),
                       ),
@@ -117,11 +128,30 @@ class _CameraScreenState extends State<CameraScreen> {
                 
                 if (_isAnalyzing) ...[
                   const SizedBox(height: 30),
-                  const CircularProgressIndicator(),
-                  const SizedBox(height: 16),
-                  const Text(
-                    'Analyzing document...',
-                    style: TextStyle(fontSize: 16, color: Colors.grey),
+                  Card(
+                    color: Colors.blue.shade50,
+                    child: Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: Column(
+                        children: [
+                          const CircularProgressIndicator(),
+                          const SizedBox(height: 16),
+                          Text(
+                            _analysisStatus.isEmpty 
+                                ? 'Processing image...' 
+                                : _analysisStatus,
+                            style: const TextStyle(fontSize: 16, color: Colors.grey),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            'This may take a few moments for accurate results',
+                            style: TextStyle(fontSize: 12, color: Colors.grey),
+                            textAlign: TextAlign.center,
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
                 ],
               ],
@@ -152,36 +182,60 @@ class _CameraScreenState extends State<CameraScreen> {
 
   Future<void> _captureImage(ImageSource source) async {
     try {
-      // Request permissions
+      // Request appropriate permissions
+      late PermissionStatus permissionStatus;
+      
       if (source == ImageSource.camera) {
-        final cameraStatus = await Permission.camera.request();
-        if (!cameraStatus.isGranted) {
+        permissionStatus = await Permission.camera.request();
+        if (!permissionStatus.isGranted) {
           _showErrorSnackBar('Camera permission is required');
           return;
         }
       } else {
-        final photosStatus = await Permission.photos.request();
-        if (!photosStatus.isGranted) {
-          _showErrorSnackBar('Photo library permission is required');
-          return;
+        // For gallery access
+        permissionStatus = await Permission.photos.request();
+        if (!permissionStatus.isGranted) {
+          // Try storage permission for older Android versions
+          permissionStatus = await Permission.storage.request();
+          if (!permissionStatus.isGranted) {
+            _showErrorSnackBar('Storage permission is required to access gallery');
+            return;
+          }
         }
       }
 
       final XFile? image = await _picker.pickImage(
         source: source,
-        imageQuality: 85,
-        maxWidth: 1920,
-        maxHeight: 1920,
+        imageQuality: 100, // Maximum quality for better analysis
+        maxWidth: 4096,    // Higher resolution for better analysis
+        maxHeight: 4096,
+        preferredCameraDevice: CameraDevice.rear, // Use rear camera for documents
       );
 
       if (image != null) {
         setState(() {
           _isAnalyzing = true;
+          _analysisStatus = 'Loading image...';
         });
 
         try {
+          // Update status
+          setState(() {
+            _analysisStatus = 'Preprocessing image...';
+          });
+          
+          await Future.delayed(const Duration(milliseconds: 500)); // Allow UI update
+          
+          setState(() {
+            _analysisStatus = 'Analyzing document features...';
+          });
+          
           // Analyze the image
           final analysis = await _analysisService.analyzeDocument(image.path);
+          
+          setState(() {
+            _analysisStatus = 'Saving results...';
+          });
           
           // Save to database
           await DatabaseService.instance.createDocument(analysis);
@@ -196,19 +250,23 @@ class _CameraScreenState extends State<CameraScreen> {
             );
           }
         } catch (e) {
+          print('Analysis error: $e');
           _showErrorSnackBar('Failed to analyze document: ${e.toString()}');
         } finally {
           if (mounted) {
             setState(() {
               _isAnalyzing = false;
+              _analysisStatus = '';
             });
           }
         }
       }
     } catch (e) {
+      print('Capture error: $e');
       _showErrorSnackBar('Failed to capture image: ${e.toString()}');
       setState(() {
         _isAnalyzing = false;
+        _analysisStatus = '';
       });
     }
   }
@@ -219,6 +277,14 @@ class _CameraScreenState extends State<CameraScreen> {
         SnackBar(
           content: Text(message),
           backgroundColor: Colors.red,
+          duration: const Duration(seconds: 4),
+          action: SnackBarAction(
+            label: 'OK',
+            textColor: Colors.white,
+            onPressed: () {
+              ScaffoldMessenger.of(context).hideCurrentSnackBar();
+            },
+          ),
         ),
       );
     }
