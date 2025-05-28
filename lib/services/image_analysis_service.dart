@@ -17,13 +17,17 @@ class ImageAnalysisService {
 
     print('Original image dimensions: ${image.width} x ${image.height}');
 
-    // Preprocess the image for better analysis
+    // Enhanced preprocessing pipeline
     final processedImage = _preprocessImage(image);
     
-    // Analyze the document with enhanced algorithms
+    // Detect document boundaries first
+    final documentBounds = _detectDocumentBounds(processedImage);
+    print('Document bounds detected: $documentBounds');
+    
+    // Analyze with detected bounds
     final paperSize = _determinePaperSize(processedImage);
-    final fontSize = await _estimateFontSize(processedImage);
-    final margins = _estimateMargins(processedImage);
+    final fontSize = await _estimateFontSize(processedImage, documentBounds);
+    final margins = _calculateMarginsFromBounds(processedImage, documentBounds);
 
     print('Analysis results - Paper: $paperSize, Font: $fontSize, Margins: $margins');
 
@@ -39,39 +43,551 @@ class ImageAnalysisService {
     );
   }
 
-  // Enhanced image preprocessing
+  // Enhanced preprocessing with better noise reduction
   img.Image _preprocessImage(img.Image image) {
-    // Convert to grayscale for easier analysis
+    // Convert to grayscale
     var processed = img.grayscale(image);
     
-    // Apply contrast enhancement
+    // Apply slight Gaussian blur to reduce noise
+    processed = img.gaussianBlur(processed, radius: 1);
+    
+    // Enhance contrast for better text detection
     processed = img.contrast(processed, contrast: 1.2);
     
-    // Apply slight sharpening to help with text detection
-    processed = img.convolution(
-      processed,
-      filter: [
-        -1, -1, -1,
-        -1,  9, -1,
-        -1, -1, -1
-      ],
-    );
+    // Apply brightness adjustment if needed
+    processed = img.adjustColor(processed, brightness: 1.1);
     
     return processed;
+  }
+
+  // Improved document boundary detection
+  Map<String, int> _detectDocumentBounds(img.Image image) {
+    final width = image.width;
+    final height = image.height;
+    
+    print('Starting boundary detection for ${width}x$height image');
+    
+    // Method 1: Content-based detection (more reliable for text documents)
+    final contentBounds = _detectContentBounds(image);
+    print('Content bounds: $contentBounds');
+    
+    // Method 2: Edge-based detection as fallback
+    final edgeBounds = _detectEdgeBasedBounds(image);
+    print('Edge bounds: $edgeBounds');
+    
+    // Method 3: Projection-based detection
+    final projectionBounds = _detectProjectionBounds(image);
+    print('Projection bounds: $projectionBounds');
+    
+    // Combine results intelligently
+    final finalBounds = {
+      'top': _selectBestBound([contentBounds['top']!, edgeBounds['top']!, projectionBounds['top']!], height, true),
+      'bottom': _selectBestBound([contentBounds['bottom']!, edgeBounds['bottom']!, projectionBounds['bottom']!], height, false),
+      'left': _selectBestBound([contentBounds['left']!, edgeBounds['left']!, projectionBounds['left']!], width, true),
+      'right': _selectBestBound([contentBounds['right']!, edgeBounds['right']!, projectionBounds['right']!], width, false),
+    };
+    
+    print('Final selected bounds: $finalBounds');
+    return finalBounds;
+  }
+
+  // New projection-based method for more accurate boundary detection
+  Map<String, int> _detectProjectionBounds(img.Image image) {
+    final width = image.width;
+    final height = image.height;
+    
+    // Horizontal projection (for top/bottom)
+    List<int> horizontalProjection = [];
+    for (int y = 0; y < height; y++) {
+      int darkPixels = 0;
+      for (int x = 0; x < width; x++) {
+        int luminance = img.getLuminance(image.getPixel(x, y)).toInt();
+        if (luminance < 200) darkPixels++;
+      }
+      horizontalProjection.add(darkPixels);
+    }
+    
+    // Vertical projection (for left/right)
+    List<int> verticalProjection = [];
+    for (int x = 0; x < width; x++) {
+      int darkPixels = 0;
+      for (int y = 0; y < height; y++) {
+        int luminance = img.getLuminance(image.getPixel(x, y)).toInt();
+        if (luminance < 200) darkPixels++;
+      }
+      verticalProjection.add(darkPixels);
+    }
+    
+    // Find boundaries based on projection thresholds
+    int contentThresholdH = (width * 0.05).round(); // Minimum dark pixels for content row
+    int contentThresholdV = (height * 0.05).round(); // Minimum dark pixels for content column
+    
+    int top = _findFirstSignificantProjection(horizontalProjection, contentThresholdH, true);
+    int bottom = _findFirstSignificantProjection(horizontalProjection, contentThresholdH, false);
+    int left = _findFirstSignificantProjection(verticalProjection, contentThresholdV, true);
+    int right = _findFirstSignificantProjection(verticalProjection, contentThresholdV, false);
+    
+    return {
+      'top': top,
+      'bottom': bottom,
+      'left': left,
+      'right': right,
+    };
+  }
+  
+  int _findFirstSignificantProjection(List<int> projection, int threshold, bool fromStart) {
+    if (fromStart) {
+      for (int i = 0; i < projection.length; i++) {
+        if (projection[i] > threshold) {
+          // Look for sustained content
+          int consecutiveCount = 0;
+          for (int j = i; j < math.min(i + 5, projection.length); j++) {
+            if (projection[j] > threshold ~/ 2) consecutiveCount++;
+          }
+          if (consecutiveCount >= 3) return math.max(0, i - 2);
+        }
+      }
+      return (projection.length * 0.05).round();
+    } else {
+      for (int i = projection.length - 1; i >= 0; i--) {
+        if (projection[i] > threshold) {
+          // Look for sustained content
+          int consecutiveCount = 0;
+          for (int j = i; j >= math.max(i - 5, 0); j--) {
+            if (projection[j] > threshold ~/ 2) consecutiveCount++;
+          }
+          if (consecutiveCount >= 3) return math.min(projection.length - 1, i + 2);
+        }
+      }
+      return projection.length - (projection.length * 0.05).round();
+    }
+  }
+
+  Map<String, int> _detectEdgeBasedBounds(img.Image image) {
+    final width = image.width;
+    final height = image.height;
+    
+    // Apply edge detection
+    final edgeImage = _simpleEdgeDetection(image);
+    
+    // Find edges by scanning from borders
+    int top = _findTopEdgeImproved(edgeImage);
+    int bottom = _findBottomEdgeImproved(edgeImage);
+    int left = _findLeftEdgeImproved(edgeImage);
+    int right = _findRightEdgeImproved(edgeImage);
+    
+    return {
+      'top': top,
+      'bottom': bottom,
+      'left': left,
+      'right': right,
+    };
+  }
+
+  // Simplified but more reliable edge detection
+  img.Image _simpleEdgeDetection(img.Image image) {
+    final width = image.width;
+    final height = image.height;
+    final result = img.Image(width: width, height: height);
+    
+    for (int y = 1; y < height - 1; y++) {
+      for (int x = 1; x < width - 1; x++) {
+        // Simple gradient calculation
+        int current = img.getLuminance(image.getPixel(x, y)).toInt();
+        int right = img.getLuminance(image.getPixel(x + 1, y)).toInt();
+        int down = img.getLuminance(image.getPixel(x, y + 1)).toInt();
+        
+        int gradientX = (right - current).abs();
+        int gradientY = (down - current).abs();
+        int gradient = gradientX + gradientY;
+        
+        gradient = math.min(255, gradient);
+        result.setPixel(x, y, img.ColorRgb8(gradient, gradient, gradient));
+      }
+    }
+    
+    return result;
+  }
+
+  int _findTopEdgeImproved(img.Image edgeImage) {
+    final width = edgeImage.width;
+    final height = edgeImage.height;
+    
+    // Start from top and look for first significant edge activity
+    for (int y = 0; y < height ~/ 3; y++) {
+      int edgePixels = 0;
+      int strongEdgePixels = 0;
+      
+      // Check across the width, focusing on middle section
+      for (int x = width ~/ 6; x < (width * 5) ~/ 6; x++) {
+        int intensity = img.getLuminance(edgeImage.getPixel(x, y)).toInt();
+        if (intensity > 50) edgePixels++;
+        if (intensity > 100) strongEdgePixels++;
+      }
+      
+      double edgeRatio = edgePixels / (width * 2 / 3);
+      double strongEdgeRatio = strongEdgePixels / (width * 2 / 3);
+      
+      // Look for significant edge activity
+      if (edgeRatio > 0.1 || strongEdgeRatio > 0.05) {
+        return math.max(0, y - 3);
+      }
+    }
+    
+    return (height * 0.08).round();
+  }
+
+  int _findBottomEdgeImproved(img.Image edgeImage) {
+    final width = edgeImage.width;
+    final height = edgeImage.height;
+    
+    for (int y = height - 1; y >= height * 2 ~/ 3; y--) {
+      int edgePixels = 0;
+      int strongEdgePixels = 0;
+      
+      for (int x = width ~/ 6; x < (width * 5) ~/ 6; x++) {
+        int intensity = img.getLuminance(edgeImage.getPixel(x, y)).toInt();
+        if (intensity > 50) edgePixels++;
+        if (intensity > 100) strongEdgePixels++;
+      }
+      
+      double edgeRatio = edgePixels / (width * 2 / 3);
+      double strongEdgeRatio = strongEdgePixels / (width * 2 / 3);
+      
+      if (edgeRatio > 0.1 || strongEdgeRatio > 0.05) {
+        return math.min(height - 1, y + 3);
+      }
+    }
+    
+    return height - (height * 0.08).round();
+  }
+
+  int _findLeftEdgeImproved(img.Image edgeImage) {
+    final width = edgeImage.width;
+    final height = edgeImage.height;
+    
+    for (int x = 0; x < width ~/ 3; x++) {
+      int edgePixels = 0;
+      int strongEdgePixels = 0;
+      
+      for (int y = height ~/ 6; y < (height * 5) ~/ 6; y++) {
+        int intensity = img.getLuminance(edgeImage.getPixel(x, y)).toInt();
+        if (intensity > 50) edgePixels++;
+        if (intensity > 100) strongEdgePixels++;
+      }
+      
+      double edgeRatio = edgePixels / (height * 2 / 3);
+      double strongEdgeRatio = strongEdgePixels / (height * 2 / 3);
+      
+      if (edgeRatio > 0.1 || strongEdgeRatio > 0.05) {
+        return math.max(0, x - 3);
+      }
+    }
+    
+    return (width * 0.08).round();
+  }
+
+  int _findRightEdgeImproved(img.Image edgeImage) {
+    final width = edgeImage.width;
+    final height = edgeImage.height;
+    
+    for (int x = width - 1; x >= width * 2 ~/ 3; x--) {
+      int edgePixels = 0;
+      int strongEdgePixels = 0;
+      
+      for (int y = height ~/ 6; y < (height * 5) ~/ 6; y++) {
+        int intensity = img.getLuminance(edgeImage.getPixel(x, y)).toInt();
+        if (intensity > 50) edgePixels++;
+        if (intensity > 100) strongEdgePixels++;
+      }
+      
+      double edgeRatio = edgePixels / (height * 2 / 3);
+      double strongEdgeRatio = strongEdgePixels / (height * 2 / 3);
+      
+      if (edgeRatio > 0.1 || strongEdgeRatio > 0.05) {
+        return math.min(width - 1, x + 3);
+      }
+    }
+    
+    return width - (width * 0.08).round();
+  }
+
+  // Improved content detection with better thresholding
+  Map<String, int> _detectContentBounds(img.Image image) {
+    final width = image.width;
+    final height = image.height;
+    
+    // Detect content by analyzing dark pixel density with adaptive thresholding
+    int top = _findContentTopImproved(image);
+    int bottom = _findContentBottomImproved(image);
+    int left = _findContentLeftImproved(image);
+    int right = _findContentRightImproved(image);
+    
+    return {
+      'top': top,
+      'bottom': bottom,
+      'left': left,
+      'right': right,
+    };
+  }
+
+  int _findContentTopImproved(img.Image image) {
+    final width = image.width;
+    final height = image.height;
+    
+    // Calculate background luminance from corners
+    int backgroundLuminance = _calculateBackgroundLuminance(image);
+    int contentThreshold = backgroundLuminance - 30; // Adaptive threshold
+    
+    print('Background luminance: $backgroundLuminance, Content threshold: $contentThreshold');
+    
+    for (int y = 0; y < height ~/ 2; y++) {
+      int contentPixels = 0;
+      int totalPixels = 0;
+      
+      // Sample across most of the width
+      for (int x = (width * 0.1).round(); x < (width * 0.9).round(); x++) {
+        int luminance = img.getLuminance(image.getPixel(x, y)).toInt();
+        if (luminance < contentThreshold) contentPixels++;
+        totalPixels++;
+      }
+      
+      double contentRatio = contentPixels / totalPixels;
+      
+      if (contentRatio > 0.08) { // Lowered threshold for better detection
+        // Verify with a few more lines
+        bool consistentContent = _verifyConsistentContent(image, y, y + 5, contentThreshold, true);
+        if (consistentContent) {
+          print('Found content top at y=$y with ratio=$contentRatio');
+          return math.max(0, y - 5);
+        }
+      }
+    }
+    
+    return (height * 0.1).round();
+  }
+
+  int _findContentBottomImproved(img.Image image) {
+    final width = image.width;
+    final height = image.height;
+    
+    int backgroundLuminance = _calculateBackgroundLuminance(image);
+    int contentThreshold = backgroundLuminance - 30;
+    
+    for (int y = height - 1; y >= height ~/ 2; y--) {
+      int contentPixels = 0;
+      int totalPixels = 0;
+      
+      for (int x = (width * 0.1).round(); x < (width * 0.9).round(); x++) {
+        int luminance = img.getLuminance(image.getPixel(x, y)).toInt();
+        if (luminance < contentThreshold) contentPixels++;
+        totalPixels++;
+      }
+      
+      double contentRatio = contentPixels / totalPixels;
+      
+      if (contentRatio > 0.08) {
+        bool consistentContent = _verifyConsistentContent(image, y - 5, y, contentThreshold, true);
+        if (consistentContent) {
+          print('Found content bottom at y=$y with ratio=$contentRatio');
+          return math.min(height - 1, y + 5);
+        }
+      }
+    }
+    
+    return height - (height * 0.1).round();
+  }
+
+  int _findContentLeftImproved(img.Image image) {
+    final width = image.width;
+    final height = image.height;
+    
+    int backgroundLuminance = _calculateBackgroundLuminance(image);
+    int contentThreshold = backgroundLuminance - 30;
+    
+    for (int x = 0; x < width ~/ 2; x++) {
+      int contentPixels = 0;
+      int totalPixels = 0;
+      
+      for (int y = (height * 0.1).round(); y < (height * 0.9).round(); y++) {
+        int luminance = img.getLuminance(image.getPixel(x, y)).toInt();
+        if (luminance < contentThreshold) contentPixels++;
+        totalPixels++;
+      }
+      
+      double contentRatio = contentPixels / totalPixels;
+      
+      if (contentRatio > 0.08) {
+        bool consistentContent = _verifyConsistentContent(image, x, x + 5, contentThreshold, false);
+        if (consistentContent) {
+          print('Found content left at x=$x with ratio=$contentRatio');
+          return math.max(0, x - 5);
+        }
+      }
+    }
+    
+    return (width * 0.1).round();
+  }
+
+  int _findContentRightImproved(img.Image image) {
+    final width = image.width;
+    final height = image.height;
+    
+    int backgroundLuminance = _calculateBackgroundLuminance(image);
+    int contentThreshold = backgroundLuminance - 30;
+    
+    for (int x = width - 1; x >= width ~/ 2; x--) {
+      int contentPixels = 0;
+      int totalPixels = 0;
+      
+      for (int y = (height * 0.1).round(); y < (height * 0.9).round(); y++) {
+        int luminance = img.getLuminance(image.getPixel(x, y)).toInt();
+        if (luminance < contentThreshold) contentPixels++;
+        totalPixels++;
+      }
+      
+      double contentRatio = contentPixels / totalPixels;
+      
+      if (contentRatio > 0.08) {
+        bool consistentContent = _verifyConsistentContent(image, x - 5, x, contentThreshold, false);
+        if (consistentContent) {
+          print('Found content right at x=$x with ratio=$contentRatio');
+          return math.min(width - 1, x + 5);
+        }
+      }
+    }
+    
+    return width - (width * 0.1).round();
+  }
+
+  // Calculate background luminance from image corners
+  int _calculateBackgroundLuminance(img.Image image) {
+    final width = image.width;
+    final height = image.height;
+    final cornerSize = math.min(width, height) ~/ 20;
+    
+    List<int> cornerLuminances = [];
+    
+    // Sample from four corners
+    for (int corner = 0; corner < 4; corner++) {
+      int startX, startY;
+      switch (corner) {
+        case 0: startX = 0; startY = 0; break; // Top-left
+        case 1: startX = width - cornerSize; startY = 0; break; // Top-right
+        case 2: startX = 0; startY = height - cornerSize; break; // Bottom-left
+        case 3: startX = width - cornerSize; startY = height - cornerSize; break; // Bottom-right
+        default: startX = 0; startY = 0;
+      }
+      
+      int sum = 0;
+      int count = 0;
+      
+      for (int y = startY; y < startY + cornerSize && y < height; y++) {
+        for (int x = startX; x < startX + cornerSize && x < width; x++) {
+          sum += img.getLuminance(image.getPixel(x, y)).toInt();
+          count++;
+        }
+      }
+      
+      if (count > 0) {
+        cornerLuminances.add(sum ~/ count);
+      }
+    }
+    
+    // Return median of corner luminances
+    if (cornerLuminances.isNotEmpty) {
+      cornerLuminances.sort();
+      return cornerLuminances[cornerLuminances.length ~/ 2];
+    }
+    
+    return 240; // Default for white background
+  }
+
+  // Verify content consistency in a region
+  bool _verifyConsistentContent(img.Image image, int start1, int end1, int threshold, bool isHorizontal) {
+    final width = image.width;
+    final height = image.height;
+    int goodLines = 0;
+    int totalLines = 0;
+    
+    if (isHorizontal) {
+      for (int y = start1; y <= end1 && y < height; y++) {
+        int contentPixels = 0;
+        int totalPixels = 0;
+        
+        for (int x = (width * 0.1).round(); x < (width * 0.9).round(); x++) {
+          int luminance = img.getLuminance(image.getPixel(x, y)).toInt();
+          if (luminance < threshold) contentPixels++;
+          totalPixels++;
+        }
+        
+        if (totalPixels > 0 && (contentPixels / totalPixels) > 0.03) {
+          goodLines++;
+        }
+        totalLines++;
+      }
+    } else {
+      for (int x = start1; x <= end1 && x < width; x++) {
+        int contentPixels = 0;
+        int totalPixels = 0;
+        
+        for (int y = (height * 0.1).round(); y < (height * 0.9).round(); y++) {
+          int luminance = img.getLuminance(image.getPixel(x, y)).toInt();
+          if (luminance < threshold) contentPixels++;
+          totalPixels++;
+        }
+        
+        if (totalPixels > 0 && (contentPixels / totalPixels) > 0.03) {
+          goodLines++;
+        }
+        totalLines++;
+      }
+    }
+    
+    return totalLines > 0 && (goodLines / totalLines) > 0.6;
+  }
+
+  // Improved bound selection with multiple candidates
+  int _selectBestBound(List<int> candidates, int maxDimension, bool isStartBound) {
+    // Remove obviously bad candidates
+    List<int> validCandidates = candidates.where((bound) {
+      double ratio = bound / maxDimension;
+      if (isStartBound) {
+        return ratio >= 0.01 && ratio <= 0.4; // 1% to 40% from start
+      } else {
+        double fromEnd = (maxDimension - bound) / maxDimension;
+        return fromEnd >= 0.01 && fromEnd <= 0.4; // 1% to 40% from end
+      }
+    }).toList();
+    
+    if (validCandidates.isEmpty) {
+      // Fallback to default margins
+      return isStartBound 
+          ? (maxDimension * 0.08).round() 
+          : maxDimension - (maxDimension * 0.08).round();
+    }
+    
+    // For start bounds, prefer smaller values (closer to edge)
+    // For end bounds, prefer larger values (closer to edge)
+    validCandidates.sort();
+    
+    if (isStartBound) {
+      return validCandidates.first;
+    } else {
+      return validCandidates.last;
+    }
   }
 
   String _determinePaperSize(img.Image image) {
     final width = image.width;
     final height = image.height;
     
-    // Determine orientation and calculate aspect ratio
     final isLandscape = width > height;
     final aspectRatio = isLandscape ? height / width : width / height;
     
     print('Image aspect ratio: $aspectRatio (${isLandscape ? 'Landscape' : 'Portrait'})');
     
-    // More precise aspect ratio matching with tolerance
-    const tolerance = 0.05;
+    const tolerance = 0.08;
     
     // A4: 210 x 297 mm -> ratio ≈ 0.707
     if (_isWithinTolerance(aspectRatio, 0.707, tolerance)) {
@@ -88,16 +604,6 @@ class ImageAnalysisService {
       return isLandscape ? 'Legal Landscape' : 'Legal Portrait';
     }
     
-    // A3: 297 x 420 mm -> ratio ≈ 0.707 (but larger)
-    if (_isWithinTolerance(aspectRatio, 0.707, tolerance) && (width > 2000 || height > 2000)) {
-      return isLandscape ? 'A3 Landscape' : 'A3 Portrait';
-    }
-    
-    // Tabloid: 11 x 17" -> ratio ≈ 0.647
-    if (_isWithinTolerance(aspectRatio, 0.647, tolerance)) {
-      return isLandscape ? 'Tabloid Landscape' : 'Tabloid Portrait';
-    }
-    
     return 'Custom Size (${width}x${height})';
   }
 
@@ -105,32 +611,42 @@ class ImageAnalysisService {
     return (value - target).abs() < tolerance;
   }
 
-  // Enhanced font size estimation using multiple techniques
-  Future<double> _estimateFontSize(img.Image image) async {
-    final width = image.width;
-    final height = image.height;
+  Future<double> _estimateFontSize(img.Image image, Map<String, int> bounds) async {
+    // Focus analysis on content area
+    final contentWidth = bounds['right']! - bounds['left']!;
+    final contentHeight = bounds['bottom']! - bounds['top']!;
     
-    // Method 1: Analyze text line heights
-    final lineHeight = _analyzeLineHeights(image);
-    double fontSizeFromLines = lineHeight * 0.75; // Typical font size is ~75% of line height
+    if (contentWidth <= 0 || contentHeight <= 0) {
+      print('Invalid content dimensions, using default font size');
+      return 12.0;
+    }
     
-    // Method 2: Analyze character dimensions
-    final charDimensions = _analyzeCharacterDimensions(image);
-    double fontSizeFromChars = charDimensions;
+    // Create content region for analysis
+    final contentImage = img.copyCrop(
+      image, 
+      x: bounds['left']!,
+      y: bounds['top']!,
+      width: contentWidth,
+      height: contentHeight,
+    );
     
-    // Method 3: Use image resolution as baseline
+    final lineHeight = _analyzeLineHeights(contentImage);
+    final charWidth = _analyzeCharacterDimensions(contentImage);
     final estimatedDPI = _estimateDPI(image);
-    double fontSizeFromDPI = _getFontSizeFromDPI(estimatedDPI, width, height);
     
-    // Combine methods with weights
-    double combinedSize = (fontSizeFromLines * 0.4) + 
-                         (fontSizeFromChars * 0.4) + 
-                         (fontSizeFromDPI * 0.2);
+    // Calculate font size from line height (most reliable)
+    double fontSizeFromLines = (lineHeight * 72) / estimatedDPI * 0.8;
     
-    // Clamp to reasonable range
-    combinedSize = math.max(8.0, math.min(24.0, combinedSize));
+    // Calculate from character width
+    double fontSizeFromChars = (charWidth * 72) / estimatedDPI;
     
-    print('Font size analysis - Lines: $fontSizeFromLines, Chars: $fontSizeFromChars, DPI: $fontSizeFromDPI, Combined: $combinedSize');
+    // Weighted average
+    double combinedSize = (fontSizeFromLines * 0.7) + (fontSizeFromChars * 0.3);
+    
+    // Reasonable bounds
+    combinedSize = math.max(8.0, math.min(18.0, combinedSize));
+    
+    print('Font analysis - Line height: $lineHeight px, Char width: $charWidth px, DPI: $estimatedDPI, Final: $combinedSize pt');
     
     return double.parse(combinedSize.toStringAsFixed(1));
   }
@@ -140,43 +656,47 @@ class ImageAnalysisService {
     final height = image.height;
     
     List<int> lineHeights = [];
-    bool inTextRegion = false;
-    int currentLineStart = 0;
+    List<int> rowDensities = [];
     
-    // Scan horizontally to find text lines
+    // Calculate text density for each row
     for (int y = 0; y < height; y++) {
       int darkPixels = 0;
-      
-      // Count dark pixels in this row (potential text)
-      for (int x = width ~/ 4; x < (width * 3) ~/ 4; x++) {
-        final pixel = image.getPixel(x, y);
-        final luminance = img.getLuminance(pixel);
+      for (int x = 0; x < width; x++) {
+        int luminance = img.getLuminance(image.getPixel(x, y)).toInt();
         if (luminance < 180) darkPixels++;
       }
+      rowDensities.add(darkPixels);
+    }
+    
+    // Find text lines based on density changes
+    bool inTextLine = false;
+    int lineStart = 0;
+    
+    for (int y = 0; y < height; y++) {
+      double density = rowDensities[y] / width;
       
-      double darkRatio = darkPixels / (width / 2);
-      
-      if (darkRatio > 0.05 && !inTextRegion) {
-        // Start of text line
-        inTextRegion = true;
-        currentLineStart = y;
-      } else if (darkRatio < 0.02 && inTextRegion) {
-        // End of text line
-        inTextRegion = false;
-        int lineHeight = y - currentLineStart;
-        if (lineHeight > 5 && lineHeight < 200) { // Reasonable line height
+      if (density > 0.05 && !inTextLine) {
+        inTextLine = true;
+        lineStart = y;
+      } else if (density < 0.02 && inTextLine) {
+        inTextLine = false;
+        int lineHeight = y - lineStart;
+        
+        if (lineHeight >= 8 && lineHeight <= 100) {
           lineHeights.add(lineHeight);
         }
       }
     }
     
-    if (lineHeights.isEmpty) return 16.0;
+    if (lineHeights.isEmpty) return 18.0;
     
-    // Calculate average line height
-    double avgLineHeight = lineHeights.reduce((a, b) => a + b) / lineHeights.length;
+    // Remove outliers and calculate median
+    lineHeights.sort();
+    double median = lineHeights.length % 2 == 0
+        ? (lineHeights[lineHeights.length ~/ 2 - 1] + lineHeights[lineHeights.length ~/ 2]) / 2.0
+        : lineHeights[lineHeights.length ~/ 2].toDouble();
     
-    // Convert pixels to points (assuming 96 DPI as baseline)
-    return (avgLineHeight * 72) / 96;
+    return median;
   }
 
   double _analyzeCharacterDimensions(img.Image image) {
@@ -185,327 +705,113 @@ class ImageAnalysisService {
     
     List<int> charWidths = [];
     
-    // Analyze vertical segments to estimate character widths
-    for (int x = width ~/ 4; x < (width * 3) ~/ 4; x += 2) {
-      int darkPixels = 0;
-      for (int y = height ~/ 4; y < (height * 3) ~/ 4; y++) {
-        final pixel = image.getPixel(x, y);
-        final luminance = img.getLuminance(pixel);
-        if (luminance < 180) darkPixels++;
-      }
+    // Analyze middle section for typical character widths
+    int startY = height ~/ 4;
+    int endY = (height * 3) ~/ 4;
+    
+    for (int y = startY; y < endY; y += 3) {
+      bool inChar = false;
+      int charStart = 0;
       
-      if (darkPixels > height ~/ 20) { // Potential character column
-        // Look for character boundaries
-        int charStart = x;
-        while (x < (width * 3) ~/ 4) {
-          darkPixels = 0;
-          for (int y = height ~/ 4; y < (height * 3) ~/ 4; y++) {
-            final pixel = image.getPixel(x, y);
-            final luminance = img.getLuminance(pixel);
-            if (luminance < 180) darkPixels++;
-          }
+      for (int x = 0; x < width; x++) {
+        int luminance = img.getLuminance(image.getPixel(x, y)).toInt();
+        bool isDark = luminance < 180;
+        
+        if (isDark && !inChar) {
+          inChar = true;
+          charStart = x;
+        } else if (!isDark && inChar) {
+          inChar = false;
+          int charWidth = x - charStart;
           
-          if (darkPixels < height ~/ 40) {
-            int charWidth = x - charStart;
-            if (charWidth > 3 && charWidth < 50) {
-              charWidths.add(charWidth);
-            }
-            break;
+          if (charWidth >= 3 && charWidth <= 40) {
+            charWidths.add(charWidth);
           }
-          x++;
         }
       }
     }
     
-    if (charWidths.isEmpty) return 12.0;
+    if (charWidths.isEmpty) return 8.0;
     
-    double avgCharWidth = charWidths.reduce((a, b) => a + b) / charWidths.length;
+    // Calculate median character width
+    charWidths.sort();
+    double median = charWidths.length % 2 == 0
+        ? (charWidths[charWidths.length ~/ 2 - 1] + charWidths[charWidths.length ~/ 2]) / 2.0
+        : charWidths[charWidths.length ~/ 2].toDouble();
     
-    // Convert to font size (characters are typically 0.6x their font size in width)
-    return ((avgCharWidth * 72) / 96) / 0.6;
+    return median;
   }
 
   double _estimateDPI(img.Image image) {
-    // Estimate DPI based on image dimensions and typical document sizes
     final width = image.width;
     final height = image.height;
     final aspectRatio = width > height ? height / width : width / height;
+    final longerSide = math.max(width, height);
     
-    // For A4 documents, estimate DPI
-    if (_isWithinTolerance(aspectRatio, 0.707, 0.05)) {
-      // A4 is 8.27 x 11.69 inches
-      final longerSide = math.max(width, height);
-      return longerSide / 11.69; // DPI estimate
+    // Estimate based on common paper sizes and typical scan/photo resolutions
+    if (_isWithinTolerance(aspectRatio, 0.707, 0.08)) {
+      // A4 document
+      if (longerSide > 3000) return 300.0;      // High-res scan
+      if (longerSide > 2000) return 200.0;      // Medium scan
+      if (longerSide > 1500) return 150.0;      // Low scan
+      return 100.0;                             // Phone photo
     }
     
-    // For Letter documents
-    if (_isWithinTolerance(aspectRatio, 0.773, 0.05)) {
-      // Letter is 8.5 x 11 inches
-      final longerSide = math.max(width, height);
-      return longerSide / 11.0;
+    if (_isWithinTolerance(aspectRatio, 0.773, 0.08)) {
+      // Letter document
+      if (longerSide > 3300) return 300.0;
+      if (longerSide > 2200) return 200.0;
+      if (longerSide > 1650) return 150.0;
+      return 100.0;
     }
     
-    // Default assumption
-    return 150.0;
+    // Default estimation based on image size
+    if (longerSide > 3000) return 250.0;
+    if (longerSide > 2000) return 180.0;
+    if (longerSide > 1200) return 120.0;
+    return 96.0;
   }
 
-  double _getFontSizeFromDPI(double dpi, int width, int height) {
-    // Typical document with 12pt font at 150 DPI
-    if (dpi > 200) return 14.0;
-    if (dpi > 150) return 12.0;
-    if (dpi > 100) return 11.0;
-    if (dpi > 72) return 10.0;
-    return 9.0;
-  }
-
-  // COMPLETELY REWRITTEN MARGIN DETECTION
-  Map<String, double> _estimateMargins(img.Image image) {
+  // Fixed margin calculation - this was the main issue!
+  Map<String, double> _calculateMarginsFromBounds(img.Image image, Map<String, int> bounds) {
     final width = image.width;
     final height = image.height;
-    
-    print('Starting margin analysis for ${width}x${height} image');
-    
-    // Create a histogram-based approach for better content detection
-    final contentMap = _createContentMap(image);
-    
-    // Find margins using the content map
-    double topMargin = _findTopMarginFromContentMap(contentMap, width, height);
-    double bottomMargin = _findBottomMarginFromContentMap(contentMap, width, height);
-    double leftMargin = _findLeftMarginFromContentMap(contentMap, width, height);
-    double rightMargin = _findRightMarginFromContentMap(contentMap, width, height);
-    
-    // Convert pixel measurements to inches using estimated DPI
     final estimatedDPI = _estimateDPI(image);
     
-    print('Margins in pixels - T:$topMargin, B:$bottomMargin, L:$leftMargin, R:$rightMargin');
+    // Calculate margins in pixels
+    double topMarginPx = bounds['top']!.toDouble();
+    double bottomMarginPx = (height - bounds['bottom']!).toDouble();
+    double leftMarginPx = bounds['left']!.toDouble();
+    double rightMarginPx = (width - bounds['right']!).toDouble();
+    
+    print('Margins in pixels - T:$topMarginPx, B:$bottomMarginPx, L:$leftMarginPx, R:$rightMarginPx');
     print('Estimated DPI: $estimatedDPI');
+    print('Image dimensions: ${width}x$height');
     
-    // Ensure minimum reasonable margins
-    final topInches = math.max(0.1, topMargin / estimatedDPI);
-    final bottomInches = math.max(0.1, bottomMargin / estimatedDPI);
-    final leftInches = math.max(0.1, leftMargin / estimatedDPI);
-    final rightInches = math.max(0.1, rightMargin / estimatedDPI);
-    
-    return {
-      'top': double.parse(topInches.toStringAsFixed(2)),
-      'bottom': double.parse(bottomInches.toStringAsFixed(2)),
-      'left': double.parse(leftInches.toStringAsFixed(2)),
-      'right': double.parse(rightInches.toStringAsFixed(2)),
+    // Convert to inches - Fixed calculation!
+    Map<String, double> marginsInInches = {
+      'top': topMarginPx / estimatedDPI,
+      'bottom': bottomMarginPx / estimatedDPI,
+      'left': leftMarginPx / estimatedDPI,
+      'right': rightMarginPx / estimatedDPI,
     };
-  }
-
-  // Create a simplified content map for faster processing
-  List<List<bool>> _createContentMap(img.Image image) {
-    final width = image.width;
-    final height = image.height;
-    final samplingRate = math.max(1, (width * height) ~/ 100000); // Adaptive sampling
     
-    List<List<bool>> contentMap = List.generate(
-      (height / samplingRate).ceil(),
-      (i) => List.filled((width / samplingRate).ceil(), false),
-    );
+    print('Margins before bounds check: $marginsInInches');
     
-    print('Creating content map with sampling rate: $samplingRate');
-    
-    for (int y = 0; y < height; y += samplingRate) {
-      for (int x = 0; x < width; x += samplingRate) {
-        final pixel = image.getPixel(x, y);
-        final luminance = img.getLuminance(pixel);
-        
-        // More aggressive threshold - anything not near white is content
-        bool hasContent = luminance < 240; // Changed from 200 to 240
-        
-        contentMap[y ~/ samplingRate][x ~/ samplingRate] = hasContent;
+    // Apply reasonable bounds but don't force to 0.1 minimum if detection found smaller margins
+    marginsInInches.forEach((key, value) {
+      // Only apply minimum if the detected margin is unreasonably small (likely detection error)
+      if (value < 0.05) {
+        marginsInInches[key] = 0.1; // 0.1 inch minimum for very small detections
+      } else if (value > 3.0) {
+        marginsInInches[key] = 3.0; // 3 inch maximum
+      } else {
+        marginsInInches[key] = double.parse(value.toStringAsFixed(2)); // Keep detected value
       }
-    }
+    });
     
-    return contentMap;
-  }
-
-  double _findTopMarginFromContentMap(List<List<bool>> contentMap, int originalWidth, int originalHeight) {
-    final mapHeight = contentMap.length;
-    final mapWidth = contentMap[0].length;
-    final samplingRate = originalHeight / mapHeight;
+    print('Final margins in inches: $marginsInInches');
     
-    // Look for the first row with significant content
-    for (int y = 0; y < mapHeight ~/ 2; y++) {
-      int contentPixels = 0;
-      
-      // Check middle 60% of the width to avoid edge noise
-      int startX = (mapWidth * 0.2).round();
-      int endX = (mapWidth * 0.8).round();
-      
-      for (int x = startX; x < endX; x++) {
-        if (contentMap[y][x]) contentPixels++;
-      }
-      
-      double contentRatio = contentPixels / (endX - startX);
-      print('Top margin check at row $y: content ratio = $contentRatio');
-      
-      // If we find a row with at least 5% content density
-      if (contentRatio > 0.05) {
-        // Look ahead to confirm this is real content, not noise
-        bool confirmedContent = false;
-        for (int checkY = y; checkY < math.min(y + 5, mapHeight); checkY++) {
-          int checkContentPixels = 0;
-          for (int x = startX; x < endX; x++) {
-            if (contentMap[checkY][x]) checkContentPixels++;
-          }
-          if (checkContentPixels / (endX - startX) > 0.03) {
-            confirmedContent = true;
-            break;
-          }
-        }
-        
-        if (confirmedContent) {
-          double margin = y * samplingRate;
-          print('Found top margin: $margin pixels');
-          return margin;
-        }
-      }
-    }
-    
-    // Default to 5% of image height
-    double defaultMargin = originalHeight * 0.05;
-    print('Using default top margin: $defaultMargin pixels');
-    return defaultMargin;
-  }
-
-  double _findBottomMarginFromContentMap(List<List<bool>> contentMap, int originalWidth, int originalHeight) {
-    final mapHeight = contentMap.length;
-    final mapWidth = contentMap[0].length;
-    final samplingRate = originalHeight / mapHeight;
-    
-    // Search from bottom up
-    for (int y = mapHeight - 1; y > mapHeight ~/ 2; y--) {
-      int contentPixels = 0;
-      
-      int startX = (mapWidth * 0.2).round();
-      int endX = (mapWidth * 0.8).round();
-      
-      for (int x = startX; x < endX; x++) {
-        if (contentMap[y][x]) contentPixels++;
-      }
-      
-      double contentRatio = contentPixels / (endX - startX);
-      print('Bottom margin check at row $y: content ratio = $contentRatio');
-      
-      if (contentRatio > 0.05) {
-        // Confirm with look-back
-        bool confirmedContent = false;
-        for (int checkY = y; checkY > math.max(y - 5, 0); checkY--) {
-          int checkContentPixels = 0;
-          for (int x = startX; x < endX; x++) {
-            if (contentMap[checkY][x]) checkContentPixels++;
-          }
-          if (checkContentPixels / (endX - startX) > 0.03) {
-            confirmedContent = true;
-            break;
-          }
-        }
-        
-        if (confirmedContent) {
-          double margin = (mapHeight - 1 - y) * samplingRate;
-          print('Found bottom margin: $margin pixels');
-          return margin;
-        }
-      }
-    }
-    
-    double defaultMargin = originalHeight * 0.05;
-    print('Using default bottom margin: $defaultMargin pixels');
-    return defaultMargin;
-  }
-
-  double _findLeftMarginFromContentMap(List<List<bool>> contentMap, int originalWidth, int originalHeight) {
-    final mapHeight = contentMap.length;
-    final mapWidth = contentMap[0].length;
-    final samplingRate = originalWidth / mapWidth;
-    
-    // Search from left
-    for (int x = 0; x < mapWidth ~/ 2; x++) {
-      int contentPixels = 0;
-      
-      int startY = (mapHeight * 0.2).round();
-      int endY = (mapHeight * 0.8).round();
-      
-      for (int y = startY; y < endY; y++) {
-        if (contentMap[y][x]) contentPixels++;
-      }
-      
-      double contentRatio = contentPixels / (endY - startY);
-      print('Left margin check at col $x: content ratio = $contentRatio');
-      
-      if (contentRatio > 0.05) {
-        // Confirm with look-ahead
-        bool confirmedContent = false;
-        for (int checkX = x; checkX < math.min(x + 5, mapWidth); checkX++) {
-          int checkContentPixels = 0;
-          for (int y = startY; y < endY; y++) {
-            if (contentMap[y][checkX]) checkContentPixels++;
-          }
-          if (checkContentPixels / (endY - startY) > 0.03) {
-            confirmedContent = true;
-            break;
-          }
-        }
-        
-        if (confirmedContent) {
-          double margin = x * samplingRate;
-          print('Found left margin: $margin pixels');
-          return margin;
-        }
-      }
-    }
-    
-    double defaultMargin = originalWidth * 0.05;
-    print('Using default left margin: $defaultMargin pixels');
-    return defaultMargin;
-  }
-
-  double _findRightMarginFromContentMap(List<List<bool>> contentMap, int originalWidth, int originalHeight) {
-    final mapHeight = contentMap.length;
-    final mapWidth = contentMap[0].length;
-    final samplingRate = originalWidth / mapWidth;
-    
-    // Search from right
-    for (int x = mapWidth - 1; x > mapWidth ~/ 2; x--) {
-      int contentPixels = 0;
-      
-      int startY = (mapHeight * 0.2).round();
-      int endY = (mapHeight * 0.8).round();
-      
-      for (int y = startY; y < endY; y++) {
-        if (contentMap[y][x]) contentPixels++;
-      }
-      
-      double contentRatio = contentPixels / (endY - startY);
-      print('Right margin check at col $x: content ratio = $contentRatio');
-      
-      if (contentRatio > 0.05) {
-        // Confirm with look-back
-        bool confirmedContent = false;
-        for (int checkX = x; checkX > math.max(x - 5, 0); checkX--) {
-          int checkContentPixels = 0;
-          for (int y = startY; y < endY; y++) {
-            if (contentMap[y][checkX]) checkContentPixels++;
-          }
-          if (checkContentPixels / (endY - startY) > 0.03) {
-            confirmedContent = true;
-            break;
-          }
-        }
-        
-        if (confirmedContent) {
-          double margin = (mapWidth - 1 - x) * samplingRate;
-          print('Found right margin: $margin pixels');
-          return margin;
-        }
-      }
-    }
-    
-    double defaultMargin = originalWidth * 0.05;
-    print('Using default right margin: $defaultMargin pixels');
-    return defaultMargin;
+    return marginsInInches;
   }
 }
